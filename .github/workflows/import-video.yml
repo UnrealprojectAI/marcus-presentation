@@ -17,9 +17,10 @@ jobs:
       - name: Import completed videos without replacing existing media
         run: |
           python3 - <<'PY'
-          import json, re, urllib.request, urllib.parse
+          import json, re, subprocess, urllib.request, urllib.parse
           from pathlib import Path
-          for request in sorted(Path('.github/video-imports').glob('*.json')):
+          changed = subprocess.check_output(['git','show','--pretty=format:','--name-only','HEAD'], text=True).splitlines()
+          for request in [Path(name) for name in changed if name.startswith('.github/video-imports/') and name.endswith('.json')]:
               item = json.loads(request.read_text())
               key = item['video_key']
               if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', key):
@@ -55,5 +56,6 @@ jobs:
           git add -- presentation
           if ! git diff --cached --quiet; then
             git commit -m "Publish completed presentation media"
+            git pull --rebase origin main
             git push
           fi

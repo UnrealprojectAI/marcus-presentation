@@ -1,17 +1,8 @@
 name: Import presentation video
 on:
-  workflow_dispatch:
-    inputs:
-      video_url:
-        description: Temporary download URL of the completed HeyGen video
-        required: true
-      poster_url:
-        description: Temporary thumbnail URL
-        required: true
-      video_key:
-        description: Existing presentation folder
-        default: 3-glada-hjartan
-        required: true
+  push:
+    branches: [main]
+    paths: ['.github/video-imports/*.json']
 permissions:
   contents: write
 concurrency:
@@ -22,44 +13,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - name: Download completed media
-        env:
-          VIDEO_URL: ${{ inputs.video_url }}
-          POSTER_URL: ${{ inputs.poster_url }}
-          VIDEO_KEY: ${{ inputs.video_key }}
+      - uses: actions/checkout@v6
+      - name: Import completed videos without replacing existing media
         run: |
           python3 - <<'PY'
-          import os, re, urllib.request, urllib.parse
+          import json, re, urllib.request, urllib.parse
           from pathlib import Path
-          key = os.environ["VIDEO_KEY"]
-          if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key):
-              raise SystemExit("Invalid video key")
-          folder = Path("presentation") / key
-          if not (folder / "index.html").is_file():
-              raise SystemExit("Create the presentation page first")
-          for name, variable, limit in [("video.mp4", "VIDEO_URL", 25*1024*1024), ("poster.jpg", "POSTER_URL", 3*1024*1024)]:
-              url = os.environ[variable]
-              parsed = urllib.parse.urlsplit(url)
-              if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".heygen.ai"):
-                  raise SystemExit("Use an HTTPS HeyGen media URL")
-              target = folder / name
-              if target.exists():
-                  raise SystemExit("Existing media is preserved; use a new folder for a new video")
-              with urllib.request.urlopen(url, timeout=60) as response:
-                  data = response.read(limit+1)
-              if len(data) > limit:
-                  raise SystemExit("Media exceeds import limit")
-              if name.endswith(".mp4") and data[4:8] != b"ftyp":
-                  raise SystemExit("Not an MP4 file")
-              target.write_bytes(data)
+          for request in sorted(Path('.github/video-imports').glob('*.json')):
+              item = json.loads(request.read_text())
+              key = item['video_key']
+              if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', key):
+                  raise SystemExit('Invalid video key')
+              folder = Path('presentation') / key
+              if not (folder/'index.html').is_file():
+                  raise SystemExit('Create the presentation page first')
+              media = folder/'video.mp4'
+              record = folder/'media.json'
+              if media.exists():
+                  if not record.exists() or json.loads(record.read_text())['video_id'] != item['video_id']:
+                      raise SystemExit('Existing media belongs to an unregistered video; do not overwrite')
+                  continue
+              downloads = []
+              for name, field, limit in [('video.mp4','video_url',25*1024*1024),('poster.jpg','poster_url',3*1024*1024)]:
+                  url = item[field]
+                  parsed = urllib.parse.urlsplit(url)
+                  if parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.heygen.ai') or parsed.username or parsed.password:
+                      raise SystemExit('Use an HTTPS HeyGen media URL')
+                  with urllib.request.urlopen(url, timeout=60) as response:
+                      data = response.read(limit+1)
+                  if len(data)>limit or (name.endswith('.mp4') and data[4:8]!=b'ftyp'):
+                      raise SystemExit('Invalid or oversized media')
+                  downloads.append((folder/name,data))
+              for target,data in downloads:
+                  target.write_bytes(data)
+              record.write_text(json.dumps({'video_id':item['video_id'],'bytes':media.stat().st_size}))
           PY
-      - name: Save video to its permanent path
-        env:
-          VIDEO_KEY: ${{ inputs.video_key }}
+      - name: Save imported media
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- "presentation/$VIDEO_KEY/video.mp4" "presentation/$VIDEO_KEY/poster.jpg"
-          git commit -m "Publish completed presentation media"
-          git push
+          git add -- presentation
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish completed presentation media"
+            git push
+          fi
